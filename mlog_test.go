@@ -4,8 +4,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	//"go.uber.org/zap"
-	"testing"
 	"fmt"
+	"testing"
 	"time"
 )
 
@@ -24,6 +24,10 @@ func TestMLog(t *testing.T) {
 	//
 	//return
 
+	// output stdin
+	Logger.Debug().Timestamp().Uint64("uid", 100).Msg("xxxxx....")
+
+	// output into file
 	ml := NewMLog(DebugLevel, FileName("test", 40))
 	time.Sleep(time.Second)
 	ml.Debug().Uint32("uid", 1023).Msg("h78-----------------------90")

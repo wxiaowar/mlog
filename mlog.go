@@ -2,6 +2,7 @@ package mlog
 
 import (
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"os"
 )
 
@@ -29,6 +30,8 @@ func init() {
 	zerolog.LevelFieldName = "l"
 	zerolog.MessageFieldName = "m"
 }
+
+var Logger = log.Logger // output stdin
 
 type MLog struct {
 	*MLogWriter
