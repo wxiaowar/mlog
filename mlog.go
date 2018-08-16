@@ -23,6 +23,13 @@ const (
 	Disabled
 )
 
+func init() {
+	//zerolog.TimeFieldFormat = ""
+	zerolog.TimestampFieldName = "t"
+	zerolog.LevelFieldName = "l"
+	zerolog.MessageFieldName = "m"
+}
+
 type MLog struct {
 	*MLogWriter
 	zerolog.Logger
@@ -30,7 +37,7 @@ type MLog struct {
 
 func NewMLog(lv int, options ...Option) *MLog {
 	wr := NewLogWriter(options...)
-	zlog := zerolog.New(wr)
+	zlog := zerolog.New(wr).With().Timestamp().Logger()
 	zlog.Level(zerolog.Level(lv))
 
 	return &MLog{
