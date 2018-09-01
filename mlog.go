@@ -25,7 +25,7 @@ const (
 )
 
 func init() {
-	//zerolog.TimeFieldFormat = ""
+	zerolog.TimeFieldFormat = "060102T15:04:05"
 	zerolog.TimestampFieldName = "t"
 	zerolog.LevelFieldName = "l"
 	zerolog.MessageFieldName = "m"
