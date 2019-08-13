@@ -1,9 +1,5 @@
 package mlog
 
-import (
-	"github.com/valyala/bytebufferpool"
-)
-
 type Option interface {
 	apply(w *MLogWriter)
 }
@@ -35,8 +31,8 @@ func RotateFile(hfunc RotateHFunc) Option {
 	})
 }
 
-func CacheBuf(max int) Option {
-	return optionFunc(func(w *MLogWriter) {
-		w.chanbuf = make(chan *bytebufferpool.ByteBuffer, max)
-	})
-}
+//func CacheBuf(max int) Option {
+//	return optionFunc(func(w *MLogWriter) {
+//		w.chanbuf = make(chan *bytebufferpool.ByteBuffer, max)
+//	})
+//}
