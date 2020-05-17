@@ -1,12 +1,13 @@
 package mlog
 
 import (
-	"github.com/rs/zerolog"
-	"github.com/rs/zerolog/log"
 	"os"
+
+	"github.com/rs/zerolog"
 )
 
 const (
+	// DebugLevel defines info log level.
 	DebugLevel = iota
 	// InfoLevel defines info log level.
 	InfoLevel
@@ -31,25 +32,35 @@ func init() {
 	zerolog.MessageFieldName = "m"
 }
 
-var Logger = log.Logger // output stdin
+// Logger global default log, stderr
+var Logger, _ = New(DebugLevel)
 
+// MLog wrapper for zerolog
 type MLog struct {
-	*MLogWriter
+	*writer
 	zerolog.Logger
 }
 
-func NewMLog(lv int, options ...Option) *MLog {
-	wr := NewLogWriter(options...)
-	zlog := zerolog.New(wr).With().Timestamp().Logger()
-	zlog.Level(zerolog.Level(lv))
-
-	return &MLog{
-		MLogWriter: wr,
-		Logger:     zlog,
+// New log
+func New(lv int, options ...Option) (*MLog, error) {
+	wr, err := newWriter(options...)
+	if err != nil {
+		return nil, err
 	}
+
+	zLog := zerolog.New(wr).With().Timestamp().Logger()
+	zLog.Level(zerolog.Level(lv))
+
+	ml := &MLog{
+		writer: wr,
+		Logger: zLog,
+	}
+
+	return ml, nil
 }
 
-func (ml *MLog) Sync() {
+// Sync output bytes
+func (ml *MLog) Close() {
 	ml.Logger.Output(os.Stderr)
-	ml.MLogWriter.Sync()
+	ml.writer.Close()
 }

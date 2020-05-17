@@ -9,47 +9,78 @@ import (
 	"time"
 )
 
-type RotateHFunc func(string) *os.File
+const (
+	NoSync = 0
+	IsSync = 1
 
-type MLogWriter struct {
-	*os.File
+	block = 1 << 13  // 8k
+	k64 = 1 << 16 // 64KiB
+)
 
-	fname string
-	max   int64
-	cur   int64
-
-	stat_t_cnt  int64
-	stat_t_size int64
-	stat_s_cnt  int64
-	stat_s_size int64
-
-	isDebug    bool
-	wait       sync.WaitGroup
-	rotateFile RotateHFunc
+var pool = &sync.Pool{
+	New: func() interface{} {
+		buf := make([]byte, 0, 512)
+		return &RingItem{Data:buf}
+	},
 }
 
-//
-func NewLogWriter(option ...Option) *MLogWriter {
-	ml := &MLogWriter{
-		max:        int64(1 << 61),
-		File:       os.Stdout,
-		rotateFile: defaultRotate,
+// MWriter write log to file
+type writer struct {
+	*os.File
+
+	name string // log file name
+	tick int64  // tick time interval
+	max  int64  // log file max size
+	cur  int64  // cur size
+
+	cache *Ring // cache for performance
+	cacheMax int
+	cacheCur int
+
+	status  int32 // sync status
+
+	exit     bool
+	exitChan chan bool
+}
+
+var defaultOut = os.Stderr
+
+// NewWriter create writer
+func newWriter(options ...Option) (*writer, error) {
+	ml := &writer{
+		max:      int64(1 << 61),
+		cache:    nil,
+		File:     defaultOut,
+		exitChan: make(chan bool),
 	}
 
-	for _, opt := range option {
+	for _, opt := range options {
 		opt.apply(ml)
 	}
 
-	ml.File = ml.rotateFile(ml.LogName())
-	return ml
+	if ml.name == "" {
+		return ml, nil
+	}
+
+	err := ml.open()
+	if err != nil {
+		return nil, err
+	}
+
+	ml.cur = ml.logFileSize()
+
+	if ml.cache != nil {
+		go ml.timeTick()
+	}
+
+	return ml, err
 }
 
-func (m *MLogWriter) Static() []byte {
+// Static log info
+func (m *writer) Static() []byte {
 	ret := map[string]interface{}{
-		"t_cnt":  m.stat_t_cnt,
-		"t_size": m.stat_t_size,
-		"s_cnt":  m.stat_s_cnt,
-		"s_size": m.stat_s_size,
+		"cnt":  m.cacheCur,
+		"max": m.cacheMax,
 	}
 
 	bts, err := json.Marshal(ret)
@@ -60,85 +91,180 @@ func (m *MLogWriter) Static() []byte {
 	return bts
 }
 
-// Write Note: should stop loginc before stop log
-func (m *MLogWriter) Write(p []byte) (n int, err error) {
-	atomic.AddInt64(&m.stat_t_cnt, 1)
-	atomic.AddInt64(&m.stat_t_size, int64(len(p)))
-	if m.isDebug {
-		fmt.Fprintf(os.Stdout, "%s", string(p))
-	}
-	return m.File.Write(p)
-}
-
-//func (m *MLogWriter) realWrite(p []byte) {
-//	byteCache := NewBuffer(2048)
-//	m.File = m.rotateFile(m.fname)
-//
-//	defer func() {
-//		n, err := byteCache.WriteTo(m.File)
-//		if err != nil {
-//			fmt.Fprintf(os.Stderr, "Write [%s] Error %v\n", byteCache.String(), err)
-//		}
-//
-//		m.stat_s_size += n
-//
-//		m.File.Sync()
-//		if m.File != os.Stderr {
-//			m.File.Close()
-//		}
-//
-//		m.wait.Done()
-//	}()
-//
-//		if m.isDebug {
-//			fmt.Fprintf(os.Stdout, "%s", string(p))
-//		}
-//
-//		m.stat_s_cnt++
-//		n, err := byteCache.WriteTo(m.File)
-//		if err != nil {
-//			fmt.Fprintf(os.Stderr, "Write[%s] Error %v\n", byteCache.String(), err)
-//			m.reopen()
-//		} else {
-//			m.stat_s_size += n
-//			m.cur += int64(n)
-//			if m.cur > m.max { // rotate
-//				m.reopen()
-//			}
-//		}
-//
-//		byteCache.Write(p)
-//}
-
-func (m MLogWriter) LogName()string {
-	return m.fname + ".log"
-}
-
-func (m *MLogWriter) reopen() {
-	m.File.Sync()
-	if m.File != os.Stderr {
-		m.File.Close()
+// Write Note: should stop logic before stop log
+func (m *writer) Write(p []byte) (n int, err error) {
+	if m.cache == nil { // dir output into disk
+		return m.File.Write(p)
 	}
 
-	lname := m.LogName()
-	name := fmt.Sprintf("%s_%s.log", m.fname, time.Now().Format("2006-01-02T15"))
-	os.Rename(lname, name)
+	// write to cache
+	m.cacheCur++
+	item := pool.Get().(*RingItem)
+	item.Data = append(item.Data, p...)
+	m.cache.Add(item)
 
-	m.cur = 0
-	m.File = m.rotateFile(lname)
+	// trigger write disk
+	//fmt.Printf("write %v-%v-%v\n", m.cacheCur, m.cacheMax, m.status)
+	if m.cacheCur > m.cacheMax && m.status == NoSync &&
+		atomic.CompareAndSwapInt32(&m.status, NoSync, IsSync) {
+		go m.flush()
+	}
+
+	return len(p), nil
 }
 
-// Sync stop rountine and sync file
-func (m *MLogWriter) Sync() {
-	m.wait.Wait()
+// close sync file
+func (m *writer) Close() {
+	if m.exit {
+		return
+	}
+
+	m.exit = true
+	<-m.exitChan
 }
 
-func defaultRotate(fname string) *os.File {
-	f, err := os.OpenFile(fname, os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC, 0666)
+func (m *writer) timeTick() {
+	if m.cache == nil {
+		return
+	}
+
+	ticker := time.NewTicker(time.Duration(m.tick) * time.Second)
+	for range ticker.C {
+		if atomic.CompareAndSwapInt32(&m.status, NoSync, IsSync) {
+			m.flush()
+		}
+
+		if m.exit && m.cacheCur == 0 {
+			m.exitChan <- true
+			return
+		}
+	}
+}
+
+//
+func (m *writer) flush() {
+	defer func() {
+		m.status = NoSync
+	}()
+
+	if m.cache == nil {
+		return
+	}
+
+	size := 0
+	ext := []byte(nil)
+	buff := make([]byte, 0, block)
+	for {
+		item, ok := m.cache.Next()
+		if !ok {
+			m.cacheCur = 0
+			break
+		}
+
+		if item.Data == nil {
+			continue
+		}
+
+		need := len(item.Data)
+		if size + need > block {
+			ext = make([]byte, 0, need)
+			copy(ext, item.Data)
+
+			m.cacheCur = m.cacheMax + 1 // for next trigger
+			break  // ignore this, not put into pool
+		}
+
+		buff = append(buff, item.Data...)
+		size += need
+
+		if cap(item.Data) <= k64 {
+			item.Data = item.Data[:0]
+			pool.Put(item)
+		}
+	}
+
+	if size < 1 {
+		return
+	}
+
+	// read data form cache
+	n, err := m.File.Write(buff)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "OpenFile[%v] Error %v", fname, err)
-		return os.Stderr
+		fmt.Fprintf(os.Stderr, "Write [%s] Error %v\n", string(buff), err)
+	} else {
+		m.cur += int64(n)
 	}
 
-	return f
+	// ext
+	if ext != nil {
+		n, err := m.File.Write(ext)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Write [%s] Error %v\n", string(ext), err)
+		} else {
+			m.cur += int64(n)
+		}
+	}
+
+	//fmt.Printf("buff: %v-%v-%v-%v-%s\n", n, err, m.cur, m.max, string(buff))
+	// sync data to disk
+	m.File.Sync()
+
+	//
+	if m.cur > m.max { // rotate
+		m.reopen()
+		m.cur = m.logFileSize()
+		//fmt.Printf("reopen.....%d-%d\n", m.cur, m.max)
+	}
+}
+
+func (m writer) logName() string {
+	return m.name + ".log"
+}
+
+func (m writer) archiveName() string {
+	return fmt.Sprintf("%s_%s.log", m.name, time.Now().Format("2006-01-02_15-04-05"))
+}
+
+func (m *writer) reopen() error {
+	if m.File == defaultOut {
+		return nil
+	}
+
+	m.close()
+
+	name := m.logName()
+	arName := m.archiveName()
+	//fmt.Printf("%v-%v-----\n", name, arName)
+	err := os.Rename(name, arName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rename file[%v=>%v] err %v\n", name, arName, err)
+	}
+
+	return m.open()
+}
+
+func (m *writer) close() {
+	m.File.Sync()
+	m.File.Close()
+}
+
+func (m *writer) logFileSize() int64 {
+	info, err := m.File.Stat()
+	if err != nil {
+		return 0
+	}
+
+	return info.Size()
+}
+
+func (m *writer) open() error {
+	f, err := os.OpenFile(m.logName(), os.O_RDWR|os.O_APPEND|os.O_CREATE|os.O_TRUNC, 0666)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "log open file [%v] rrror %v", m.logName(), err)
+		m.File = defaultOut
+		return err
+	}
+
+	m.File = f
+	return nil
 }

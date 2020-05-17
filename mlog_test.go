@@ -1,10 +1,10 @@
 package mlog
 
 import (
+	"fmt"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	//"go.uber.org/zap"
-	"fmt"
+
 	"testing"
 	"time"
 )
@@ -27,18 +27,26 @@ func TestMLog(t *testing.T) {
 	// output stdin
 	Logger.Debug().Timestamp().Uint64("uid", 100).Msg("xxxxx....")
 
+	Logger.Debug().Fields(map[string]interface{}{"a":1, "b":2}).Msg("ok")
+
 	// output into file
-	ml := NewMLog(DebugLevel, FileName("test", 40))
+	ml, _ := New(DebugLevel, Logfile("debug", 40), Cache(8, 127, 1, func(i int) {
+		fmt.Printf("###############alert clision %v\n", i)
+	}))
+
 	time.Sleep(time.Second)
-	ml.Debug().Uint32("uid", 1023).Msg("h78-----------------------90")
-	time.Sleep(time.Second)
-	ml.Debug().Uint32("uid", 1023).Msg("hehehe111111111111111111111")
-	time.Sleep(time.Second)
-	ml.Debug().Uint32("uid", 1023).Msg("hehehe1234")
-	time.Sleep(time.Second)
+	for i:=0; i< 1000; i++ {
+		go func(i int) {
+			ml.Debug().Uint32("uid", uint32(i)).Msg("h78-----------------------90")
+		}(i)
+
+		if i % 100 == 0 {
+			time.Sleep(time.Second)
+		}
+	}
 
 	defer func() {
-		ml.Sync()
+		ml.Close()
 		s := ml.Static()
 		fmt.Printf("static =%s\n", string(s))
 	}()

@@ -1,38 +1,32 @@
 package mlog
 
+// Option argus for MLog
 type Option interface {
-	apply(w *MLogWriter)
+	apply(w *writer)
 }
 
 // optionFunc wraps a func so it satisfies the Option interface.
-type optionFunc func(w *MLogWriter)
+type optionFunc func(w *writer)
 
-func (f optionFunc) apply(w *MLogWriter) {
+func (f optionFunc) apply(w *writer) {
 	f(w)
 }
 
-func DebugModel() Option {
-	return optionFunc(func(w *MLogWriter) {
-		w.isDebug = true
-	})
-}
-
-
-func FileName(fname string, max int64) Option {
-	return optionFunc(func(w *MLogWriter) {
-		w.fname = fname
+// FileName set log file name
+func Logfile(name string, max int64) Option {
+	return optionFunc(func(w *writer) {
+		w.name = name
 		w.max = max
 	})
 }
 
-func RotateFile(hfunc RotateHFunc) Option {
-	return optionFunc(func(w *MLogWriter) {
-		w.rotateFile = hfunc
+//
+func Cache(try, max int, tick int64, alert Alerter) Option {
+	return optionFunc(func(w *writer) {
+		w.cache = NewRing(try, max, alert)
+		w.cacheMax = max / 2
+		w.tick = tick
 	})
 }
 
-//func CacheBuf(max int) Option {
-//	return optionFunc(func(w *MLogWriter) {
-//		w.chanbuf = make(chan *bytebufferpool.ByteBuffer, max)
-//	})
-//}
+
