@@ -1,4 +1,4 @@
-module mlog
+module github.com/wxiaowar/mlog
 
 go 1.14
 
